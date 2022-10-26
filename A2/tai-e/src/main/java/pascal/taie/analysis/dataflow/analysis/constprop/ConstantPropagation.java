@@ -57,19 +57,6 @@ public class ConstantPropagation extends
             if(canHoldInt(parameter))
                 fact.update(parameter, Value.getNAC());
 
-        for(Stmt stmt : cfg)
-        {
-            var left = stmt.getDef();
-            if(left.isPresent() &&left.get() instanceof Var && canHoldInt((Var) left.get()))
-                if(!parameters.contains((Var) left.get()))
-                    fact.update((Var) left.get(), Value.getUndef());
-            var right = stmt.getUses();
-            for(RValue rv: right)
-                if(rv instanceof Var && canHoldInt((Var) rv))
-                    if(!parameters.contains((Var) rv))
-                        fact.update((Var) rv, Value.getUndef());
-        }
-
         return fact;
     }
 
