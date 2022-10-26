@@ -33,21 +33,13 @@ import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.cfg.Edge;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.ArrayAccess;
-import pascal.taie.ir.exp.CastExp;
-import pascal.taie.ir.exp.FieldAccess;
-import pascal.taie.ir.exp.NewExp;
-import pascal.taie.ir.exp.RValue;
-import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.exp.*;
 import pascal.taie.ir.stmt.AssignStmt;
 import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -71,7 +63,114 @@ public class DeadCodeDetection extends MethodAnalysis {
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
         // TODO - finish me
         // Your task is to recognize dead code in ir and add it to deadCode
+
+        var nodeMap = new HashMap<Stmt, Boolean>();
+        for(Stmt s:cfg.getNodes())
+        {
+            if (cfg.isEntry(s) || cfg.isExit(s))
+                nodeMap.put(s, true);
+            else
+                nodeMap.put(s, false);
+        }
+        var queue = new LinkedList<Stmt>();
+        queue.add(cfg.getEntry());
+
+        while(!queue.isEmpty())
+        {
+
+            var stmt = queue.removeFirst();
+            if(stmt instanceof If)
+            {
+                var condition  = ((If) stmt).getCondition();
+                enqueue(cfg, stmt, queue, nodeMap, evaluateCondition(condition, constants.getInFact(stmt)));
+            }else if(stmt instanceof SwitchStmt){
+                var variable = ((SwitchStmt) stmt).getVar();
+                var fact = constants.getResult(stmt);
+                var value = fact.get(variable);
+                if(value.isConstant())
+                {
+                    int constant = value.getConstant();
+                    boolean flag = true;
+                    var caseTargets = ((SwitchStmt) stmt).getCaseTargets();
+                    for(var pair: caseTargets)
+                    {
+                        var caseStmt = pair.second();
+                        if(pair.first() == constant && !nodeMap.get(caseStmt))
+                        {
+                            flag = false;
+                            queue.add(caseStmt);
+                            nodeMap.replace(caseStmt, true);
+                        }
+                    }
+                    var defaultStmt = ((SwitchStmt) stmt).getDefaultTarget();
+                    if(flag && !nodeMap.get(defaultStmt)){
+                        queue.add(defaultStmt);
+                        nodeMap.replace(defaultStmt, true);
+                    }
+                }
+                else
+                    enqueue(cfg, stmt, queue, nodeMap, null);
+            }else{
+                enqueue(cfg, stmt, queue, nodeMap, null);
+            }
+
+
+            if(stmt instanceof AssignStmt<?,?>)
+            {
+                var def = stmt.getDef();
+                if(def.isPresent() && def.get() instanceof Var variable)
+                {
+                    var fact = liveVars.getResult(stmt);
+                    if(!fact.contains(variable))
+                    {
+                        boolean flag = true;
+                        for(var v: stmt.getUses())
+                            if(!hasNoSideEffect(v))
+                            {
+                                flag = false;
+                                break;
+                            }
+                        if(flag)
+                            deadCode.add(stmt);
+                    }
+                }
+            }
+        }
+        for(var key: nodeMap.keySet())
+        {
+            if(!nodeMap.get(key))
+                deadCode.add(key);
+        }
         return deadCode;
+    }
+
+    private void enqueue(CFG<Stmt> cfg, Stmt s, LinkedList<Stmt> q, HashMap<Stmt, Boolean> map, Edge.Kind kind)
+    {
+        for(Edge<Stmt> edge: cfg.getOutEdgesOf(s))
+            if (edge.getKind() != kind) {
+                var target = edge.getTarget();
+                if(!map.get(target))
+                {
+                    q.add(target);
+                    map.replace(target, true);
+                }
+            }
+    }
+
+
+    private Edge.Kind evaluateCondition(ConditionExp condition, CPFact fact){
+        var value = ConstantPropagation.evaluate(condition, fact);
+        if(!value.isConstant())
+            return null;
+        else
+        {
+            if(value.getConstant() == 1)
+                return Edge.Kind.IF_FALSE;
+            else if(value.getConstant() == 0)
+                return Edge.Kind.IF_TRUE;
+            else
+                return null;
+        }
     }
 
     /**
