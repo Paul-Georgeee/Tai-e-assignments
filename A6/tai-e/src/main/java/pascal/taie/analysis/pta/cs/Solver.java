@@ -80,6 +80,7 @@ class Solver {
 
     private WorkList workList;
 
+
     private PointerAnalysisResult result;
 
     Solver(AnalysisOptions options, HeapModel heapModel,
@@ -112,6 +113,14 @@ class Solver {
      */
     private void addReachable(CSMethod csMethod) {
         // TODO - finish me
+        StmtProcessor stmtProcessor = new StmtProcessor(csMethod);
+        if(!callGraph.contains((csMethod)))
+        {
+            callGraph.addReachableMethod((csMethod));
+            for(var stmt: csMethod.getMethod().getIR().getStmts())
+                stmt.accept(stmtProcessor);
+        }
+
     }
 
     /**
@@ -130,6 +139,58 @@ class Solver {
 
         // TODO - if you choose to implement addReachable()
         //  via visitor pattern, then finish me
+
+
+        @Override
+        public Void visit(New stmt) {
+            var newObj = heapModel.getObj(stmt);
+            var heapContext = contextSelector.selectHeapContext(csMethod, newObj);
+            workList.addEntry(csManager.getCSVar(this.context, stmt.getLValue()), PointsToSetFactory.make(csManager.getCSObj(heapContext, newObj)));
+            return null;
+        }
+
+        @Override
+        public Void visit(Copy stmt) {
+            addPFGEdge(csManager.getCSVar(this.context, stmt.getRValue()), csManager.getCSVar(this.context, stmt.getLValue()));
+            return null;
+        }
+
+        @Override
+        public Void visit(LoadField stmt) {
+            if(stmt.isStatic())
+            {
+                var jField = stmt.getFieldRef().resolve();
+                var staticField = csManager.getStaticField(jField);
+                var csVarPtr = csManager.getCSVar(this.context, stmt.getLValue());
+                addPFGEdge(staticField, csVarPtr);
+            }
+            return StmtVisitor.super.visit(stmt);
+        }
+
+        @Override
+        public Void visit(StoreField stmt) {
+            if(stmt.isStatic())
+            {
+                var jField = stmt.getFieldRef().resolve();
+                var staticField = csManager.getStaticField(jField);
+                var csVarPtr = csManager.getCSVar(this.context, stmt.getRValue());
+                addPFGEdge(csVarPtr, staticField);
+            }
+            return StmtVisitor.super.visit(stmt);
+        }
+
+        @Override
+        public Void visit(Invoke stmt) {
+            if(stmt.isStatic())
+            {
+                var jMethod = resolveCallee(null, stmt);
+                var csCallSite = csManager.getCSCallSite(this.context, stmt);
+                var context = contextSelector.selectContext(csCallSite, jMethod);
+                if(callGraph.addEdge(new Edge<>(getCallKind(stmt), csCallSite, csManager.getCSMethod(context, jMethod))))
+                    handleFuncArgsReturn(this.context, stmt, context, jMethod);
+            }
+            return StmtVisitor.super.visit(stmt);
+        }
     }
 
     /**
@@ -137,6 +198,12 @@ class Solver {
      */
     private void addPFGEdge(Pointer source, Pointer target) {
         // TODO - finish me
+        if(pointerFlowGraph.addEdge(source, target))
+        {
+            var pointSet = source.getPointsToSet();
+            if(!pointSet.isEmpty())
+                workList.addEntry(target, pointSet);
+        }
     }
 
     /**
@@ -144,6 +211,48 @@ class Solver {
      */
     private void analyze() {
         // TODO - finish me
+        while (!workList.isEmpty())
+        {
+            var entry = workList.pollEntry();
+            var pointer = entry.pointer();
+            var diffSet = propagate(pointer, entry.pointsToSet());
+            if(pointer instanceof CSVar)
+            {
+                for(var obj: diffSet)
+                {
+                    var variable = ((CSVar) pointer).getVar();
+                    var context = ((CSVar) pointer).getContext();
+                    for(var stmt: variable.getStoreFields())
+                    {
+                        var jField = stmt.getFieldRef().resolve();
+                        var rValue = stmt.getRValue();
+                        addPFGEdge(csManager.getCSVar(context, rValue), csManager.getInstanceField(obj, jField));
+                    }
+
+                    for(var stmt: variable.getLoadFields())
+                    {
+                        var jField = stmt.getFieldRef().resolve();
+                        var lValue = stmt.getLValue();
+                        addPFGEdge(csManager.getInstanceField(obj, jField), csManager.getCSVar(context, lValue));
+                    }
+
+                    for(var stmt: variable.getStoreArrays())
+                    {
+                        var rValue = stmt.getRValue();
+                        addPFGEdge(csManager.getCSVar(context, rValue), csManager.getArrayIndex(obj));
+                    }
+
+                    for(var stmt: variable.getLoadArrays())
+                    {
+                        var lValue = stmt.getLValue();
+                        addPFGEdge(csManager.getArrayIndex(obj), csManager.getCSVar(context, lValue));
+                    }
+
+                    processCall((CSVar) pointer, obj);
+                }
+
+            }
+        }
     }
 
     /**
@@ -152,7 +261,20 @@ class Solver {
      */
     private PointsToSet propagate(Pointer pointer, PointsToSet pointsToSet) {
         // TODO - finish me
-        return null;
+        var diffSet = PointsToSetFactory.make();
+        var pSet = pointer.getPointsToSet();
+        for(var obj: pointsToSet) {
+            if(!pSet.contains(obj)) {
+                diffSet.addObject(obj);
+                pSet.addObject(obj);
+            }
+        }
+        if(!diffSet.isEmpty()){
+            for(var p: pointerFlowGraph.getSuccsOf(pointer)){
+                workList.addEntry(p, diffSet);
+            }
+        }
+        return diffSet;
     }
 
     /**
@@ -163,6 +285,22 @@ class Solver {
      */
     private void processCall(CSVar recv, CSObj recvObj) {
         // TODO - finish me
+        var variable = recv.getVar();
+        var callerContext = recv.getContext();
+        for(var stmt: variable.getInvokes())
+        {
+            var jMethod = resolveCallee(recvObj, stmt);
+            var ir = jMethod.getIR();
+            var thisVar = ir.getThis();
+            var csCallSite = csManager.getCSCallSite(callerContext, stmt);
+            var calleeContext = contextSelector.selectContext(csCallSite, recvObj, jMethod);
+            if(thisVar != null)
+            {
+                workList.addEntry(csManager.getCSVar(calleeContext, thisVar), PointsToSetFactory.make(recvObj));
+                if(callGraph.addEdge(new Edge<>(getCallKind(stmt), csCallSite, csManager.getCSMethod(calleeContext, jMethod))))
+                    handleFuncArgsReturn(callerContext, stmt, calleeContext, jMethod);
+            }
+        }
     }
 
     /**
@@ -176,6 +314,40 @@ class Solver {
     private JMethod resolveCallee(CSObj recv, Invoke callSite) {
         Type type = recv != null ? recv.getObject().getType() : null;
         return CallGraphs.resolveCallee(type, callSite);
+    }
+
+    private CallKind getCallKind(Invoke callSite)
+    {
+        if(callSite.isStatic())
+            return CallKind.STATIC;
+        else if(callSite.isSpecial())
+            return CallKind.SPECIAL;
+        else if(callSite.isVirtual())
+            return CallKind.VIRTUAL;
+        else if(callSite.isInterface())
+            return CallKind.INTERFACE;
+        else
+            assert false;
+        return null;
+    }
+
+    private void handleFuncArgsReturn(Context callerContext, Invoke stmt, Context calleeContext, JMethod jMethod)
+    {
+        addReachable(csManager.getCSMethod(calleeContext, jMethod));
+        var formalArgs =  jMethod.getIR().getParams();
+        var invokeExp = stmt.getInvokeExp();
+        var practicalArgs = invokeExp.getArgs();
+        assert formalArgs.size() == practicalArgs.size();
+        for(int i = 0; i < formalArgs.size(); ++i)
+        {
+            var formalArg = formalArgs.get(i);
+            var practicalArg = practicalArgs.get(i);
+            addPFGEdge(csManager.getCSVar(callerContext, practicalArg), csManager.getCSVar(calleeContext, formalArg));
+        }
+        var lValue = stmt.getLValue();
+        if(lValue != null)
+            for(var returnVal: jMethod.getIR().getReturnVars())
+                addPFGEdge(csManager.getCSVar(calleeContext, returnVal), csManager.getCSVar(callerContext, lValue));
     }
 
     PointerAnalysisResult getResult() {

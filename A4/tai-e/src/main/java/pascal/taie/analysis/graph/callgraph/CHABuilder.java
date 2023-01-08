@@ -74,12 +74,12 @@ class CHABuilder implements CGBuilder<Invoke, JMethod> {
             {
                 callGraph.addReachableMethod(jMethod);
                 callGraph.callSitesIn(jMethod).forEach((callSite)->{
-                        for(var callee: resolve(callSite))
-                        {
-                            workList.add(callee);
-                            callGraph.addEdge(new Edge<>(getCallKind(callSite), callSite, callee));
+                            for(var callee: resolve(callSite))
+                            {
+                                workList.add(callee);
+                                callGraph.addEdge(new Edge<>(getCallKind(callSite), callSite, callee));
+                            }
                         }
-                    }
                 );
             }
         }
